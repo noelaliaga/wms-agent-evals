@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from types import SimpleNamespace
 from typing import Any
 
@@ -59,11 +61,79 @@ def test_recorded_completion_refuses_unadvertised_tools_and_wrong_model() -> Non
         RecordedCompletion("mock/x", [])(model="mock/y", messages=MESSAGES)
 
 
-def test_recorded_turn_needs_exactly_one_kind() -> None:
-    with pytest.raises(ValueError, match="exactly one"):
+def test_recorded_turn_shapes() -> None:
+    with pytest.raises(ValueError, match="needs 'tool', 'tools' or 'say'"):
         RecordedTurn.model_validate({})
-    with pytest.raises(ValueError, match="exactly one"):
-        RecordedTurn.model_validate({"say": "x", "tool": {"name": "get_order"}})
+    with pytest.raises(ValueError, match="not both"):
+        RecordedTurn.model_validate({"tool": {"name": "a"}, "tools": [{"name": "b"}]})
+    both = RecordedTurn.model_validate({"say": "x", "tool": {"name": "get_order"}})
+    assert [c.name for c in both.calls] == ["get_order"]
+    assert both.say == "x"
+
+
+def test_parallel_calls_and_text_alongside_go_through_the_upstream_parser() -> None:
+    rec = RecordedCompletion(
+        "mock/x",
+        turns(
+            {
+                "say": "Checking both.",
+                "tools": [
+                    {"name": "get_order", "args": {"order_ref": "10437"}},
+                    {"name": "set_order_status", "args": {"order_ref": "10437"}},
+                ],
+            }
+        ),
+    )
+    model = MeteredModel("mock/x", rec, lambda _: 0.0)
+    turn = model.complete(MESSAGES, TOOLS)
+    assert turn.text == "Checking both."
+    assert [c.name for c in turn.tool_calls] == ["get_order", "set_order_status"]
+    assert len({c.id for c in turn.tool_calls}) == 2
+
+
+def test_malformed_tool_arguments_raise_instead_of_passing_silently() -> None:
+    def completion(**_: Any) -> Any:
+        call = {"id": "c1", "function": {"name": "get_order", "arguments": '{"order_ref": '}}
+        return _response(None, {"prompt_tokens": 1, "completion_tokens": 1}, [call])
+
+    model = MeteredModel("provider/m", completion, lambda _: 0.0)
+    with pytest.raises(json.JSONDecodeError):
+        model.complete(MESSAGES, TOOLS)
+
+
+def test_a_failed_call_makes_usage_unknown() -> None:
+    responses = iter([_response(None, {"prompt_tokens": 10, "completion_tokens": 2})])
+
+    def flaky(**_: Any) -> Any:
+        try:
+            return next(responses)
+        except StopIteration:
+            raise TimeoutError("provider timed out") from None
+
+    model = MeteredModel("provider/m", flaky, lambda _: 0.001)
+    model.complete(MESSAGES, TOOLS)
+    assert (model.input_tokens, model.cost_usd) == (10, 0.001)
+    with pytest.raises(TimeoutError):
+        model.complete(MESSAGES, TOOLS)
+    assert len(model.calls) == 2
+    assert (model.input_tokens, model.output_tokens, model.cost_usd) == (None, None, None)
+
+
+def test_temperature_none_is_left_out_of_the_request() -> None:
+    sent: list[dict[str, Any]] = []
+
+    def completion(**kwargs: Any) -> Any:
+        sent.append(kwargs)
+        return _response("ok", None)
+
+    MeteredModel("provider/m", completion, lambda _: None, temperature=None).complete(
+        MESSAGES, TOOLS
+    )
+    MeteredModel("provider/m", completion, lambda _: None, temperature=0.3).complete(
+        MESSAGES, TOOLS
+    )
+    assert "temperature" not in sent[0]
+    assert sent[1]["temperature"] == 0.3
 
 
 def test_estimate_tokens_is_ceil_chars_over_four() -> None:
@@ -172,3 +242,40 @@ def test_shipped_recordings_cover_every_task(
 def test_live_model_refuses_recordings() -> None:
     with pytest.raises(ValueError, match="offline recording"):
         live_model("mock/careful")
+
+
+class FakeLiteLLM(types.ModuleType):
+    """Stands in for the litellm module: no network, no keys."""
+
+    def __init__(self, cost: Any) -> None:
+        super().__init__("litellm")
+        self.sent: list[dict[str, Any]] = []
+        self._cost = cost
+
+    def completion(self, **kwargs: Any) -> Any:
+        self.sent.append(kwargs)
+        return _response("Packed.", {"prompt_tokens": 50, "completion_tokens": 5})
+
+    def completion_cost(self, completion_response: Any) -> Any:
+        if isinstance(self._cost, Exception):
+            raise self._cost
+        return self._cost
+
+
+@pytest.mark.parametrize(
+    ("cost", "expected"),
+    [(0.0004, 0.0004), (None, None), (RuntimeError("model not mapped"), None)],
+)
+def test_live_model_with_a_fake_litellm(
+    monkeypatch: pytest.MonkeyPatch, cost: Any, expected: float | None
+) -> None:
+    fake = FakeLiteLLM(cost)
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    model = live_model("provider/some-model", temperature=None)
+    turn = model.complete(MESSAGES, TOOLS)
+    assert turn.text == "Packed."
+    assert fake.sent[0]["drop_params"] is True
+    assert fake.sent[0]["model"] == "provider/some-model"
+    assert "temperature" not in fake.sent[0]
+    assert model.input_tokens == 50
+    assert model.cost_usd == expected

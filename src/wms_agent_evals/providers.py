@@ -69,17 +69,27 @@ class MeteredModel:
     name: str
     completion: Completion
     cost_fn: CostFn
-    temperature: float = 0.0
+    # None leaves temperature out of the request: some reasoning models reject any value.
+    temperature: float | None = 0.0
     calls: list[CallUsage] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self._inner = LiteLLMModel(
-            self.name, completion=self._metered_completion, temperature=self.temperature
+            self.name, completion=self._metered_completion, temperature=self.temperature or 0.0
         )
 
     def _metered_completion(self, **kwargs: Any) -> Any:
+        if self.temperature is None:
+            kwargs.pop("temperature", None)
         started = time.perf_counter()
-        response = self.completion(**kwargs)
+        try:
+            response = self.completion(**kwargs)
+        except BaseException:
+            # A failed call has unknown usage, so the run's totals become n/a
+            # instead of a partial sum that looks complete.
+            latency = round((time.perf_counter() - started) * 1000, 2)
+            self.calls.append(CallUsage(None, None, None, latency))
+            raise
         latency = round((time.perf_counter() - started) * 1000, 2)
         tokens_in, tokens_out = usage_from_response(response)
         try:
@@ -121,17 +131,24 @@ class MeteredModel:
 # ------------------------------------------------------------------------- live
 
 
-def live_model(model: str, temperature: float = 0.0) -> MeteredModel:
-    """A model served by LiteLLM with the caller's own API keys (paid calls)."""
+def live_model(model: str, temperature: float | None = 0.0) -> MeteredModel:
+    """A model served by LiteLLM with the caller's own API keys (paid calls).
+
+    ``drop_params=True`` asks LiteLLM to drop request parameters a provider does
+    not support instead of failing the call; ``temperature=None`` omits it.
+    """
     if model.startswith(MOCK_PREFIX):
         raise ValueError(f"{model!r} is an offline recording, not a live model")
     litellm = importlib.import_module("litellm")
+
+    def completion(**kwargs: Any) -> Any:
+        return litellm.completion(drop_params=True, **kwargs)
 
     def cost(response: Any) -> float | None:
         value = litellm.completion_cost(completion_response=response)
         return float(value) if value is not None else None
 
-    return MeteredModel(model, litellm.completion, cost, temperature)
+    return MeteredModel(model, completion, cost, temperature)
 
 
 # ---------------------------------------------------------------------- offline
@@ -151,14 +168,23 @@ class RecordedToolCall(_Strict):
 
 
 class RecordedTurn(_Strict):
+    """One assistant turn: a tool call, several parallel ones, text, or text plus calls."""
+
     tool: RecordedToolCall | None = None
+    tools: list[RecordedToolCall] = Field(default_factory=list)
     say: str | None = None
 
     @model_validator(mode="after")
-    def _one_kind(self) -> RecordedTurn:
-        if (self.tool is None) == (self.say is None):
-            raise ValueError("a recorded turn needs exactly one of 'tool' or 'say'")
+    def _shape(self) -> RecordedTurn:
+        if self.tool is not None and self.tools:
+            raise ValueError("a recorded turn takes 'tool' or 'tools', not both")
+        if self.tool is None and not self.tools and self.say is None:
+            raise ValueError("a recorded turn needs 'tool', 'tools' or 'say'")
         return self
+
+    @property
+    def calls(self) -> list[RecordedToolCall]:
+        return [self.tool] if self.tool is not None else list(self.tools)
 
 
 class Pricing(_Strict):
@@ -245,18 +271,21 @@ class RecordedCompletion:
         self._next += 1
         advertised = {t["function"]["name"] for t in tools}
         message: dict[str, Any] = {"role": "assistant", "content": turn.say}
-        if turn.tool is not None:
-            if turn.tool.name not in advertised:
-                raise MockProviderError(f"{self.model}: tool {turn.tool.name!r} not advertised")
+        calls = turn.calls
+        for call in calls:
+            if call.name not in advertised:
+                raise MockProviderError(f"{self.model}: tool {call.name!r} not advertised")
+        if calls:
             message["tool_calls"] = [
                 {
-                    "id": f"call_{self._next}",
+                    "id": f"call_{self._next}_{i}",
                     "type": "function",
                     "function": {
-                        "name": turn.tool.name,
-                        "arguments": json.dumps(turn.tool.args, ensure_ascii=False),
+                        "name": call.name,
+                        "arguments": json.dumps(call.args, ensure_ascii=False),
                     },
                 }
+                for i, call in enumerate(calls)
             ]
         return {
             "id": f"mock-{self._next}",
@@ -265,7 +294,7 @@ class RecordedCompletion:
                 {
                     "index": 0,
                     "message": message,
-                    "finish_reason": "tool_calls" if turn.tool else "stop",
+                    "finish_reason": "tool_calls" if calls else "stop",
                 }
             ],
             "usage": {
