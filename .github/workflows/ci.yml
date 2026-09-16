@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-eval:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      # vendor/mcp-logistica is a submodule with a relative URL (../mcp-logistica), so it
+      # resolves to <owner>/mcp-logistica. While that repository is private, add a
+      # read-only fine-grained token as the SUBMODULES_TOKEN secret; once it is public the
+      # default token is enough.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            vendor/mcp-logistica/pyproject.toml
+
+      - name: Install (mcp-logistica from the submodule, then this package)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e vendor/mcp-logistica
+          python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Type check (mypy --strict)
+        run: mypy
+
+      - name: Tests
+        run: pytest
+
+      - name: Validate dataset, recordings and prompts
+        run: wms-evals validate
+
+      - name: Offline eval (mock provider, synthetic recordings, no API keys)
+        run: wms-evals run --provider mock --out out/offline
+
+      - name: Offline results match the committed report
+        run: wms-evals compare reports/offline/results.json out/offline/results.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: offline-report-py${{ matrix.python-version }}
+          path: out/offline/
