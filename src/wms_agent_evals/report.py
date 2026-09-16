@@ -14,8 +14,8 @@ from wms_agent_evals.dataset import Category
 
 RESULTS_SCHEMA = 1
 CHECKS = ("tool_choice", "arguments", "clarification", "grounded")
-# Fields that depend on the machine, the clock or the temp dir, not on behaviour.
-VOLATILE_KEYS = frozenset({"model_latency_ms", "task_latency_ms", "generated_at"})
+# Fields that depend on the machine, the clock or how the runs were scheduled, not on behaviour.
+VOLATILE_KEYS = frozenset({"model_latency_ms", "task_latency_ms", "generated_at", "concurrency"})
 
 OFFLINE_BANNER = (
     "OFFLINE RUN. The models below are hand-written, synthetic recordings replayed by a "
@@ -177,6 +177,7 @@ def _tables(doc: dict[str, Any]) -> tuple[list[str], list[list[str]], list[str],
         "Tokens in",
         "Tokens out",
         "Cost",
+        "Mean model latency (ms)",
         "Mean task latency (ms)",
     ]
     rows = [
@@ -191,6 +192,7 @@ def _tables(doc: dict[str, Any]) -> tuple[list[str], list[list[str]], list[str],
             _num(s.input_tokens),
             _num(s.output_tokens),
             _cost(s.cost_usd),
+            _num(s.mean_model_latency_ms, 1),
             _num(s.mean_task_latency_ms, 1),
         ]
         for s in sums
@@ -254,6 +256,25 @@ def _banner(meta: dict[str, Any]) -> str:
     return OFFLINE_BANNER if meta.get("mode") == "offline" else LIVE_BANNER
 
 
+OFFLINE_LATENCY_NOTE = (
+    "Offline, model latency is the time the mock provider takes to replay a recorded turn, "
+    "so it is close to zero and says nothing about a real provider."
+)
+
+
+def _metric_note(meta: dict[str, Any]) -> str:
+    note = (
+        "Rates are over the tasks that grade that check. Prohibited attempts counts write calls "
+        "beyond what a task allows, plus any write the server applied on a task where the "
+        "database must not change; prohibited writes landed counts runs where any table "
+        "changed although it must not. Model latency is the sum of completion calls; task "
+        "latency is the whole run, including the local MCP server start and round-trips."
+    )
+    if meta.get("mode") == "offline":
+        note += " " + OFFLINE_LATENCY_NOTE
+    return note
+
+
 def render_markdown(doc: dict[str, Any]) -> str:
     meta = doc["meta"]
     head, rows, cat_head, cat_rows = _tables(doc)
@@ -271,10 +292,7 @@ def render_markdown(doc: dict[str, Any]) -> str:
         "Prompt versions: " + ", ".join(f"`{v}`" for v in meta.get("prompt_versions", [])) + ".",
         "## Summary by model and prompt",
         _md_table(head, rows),
-        "Rates are over the tasks that grade that check. *Prohibited attempts* counts write "
-        "calls beyond what a task allows; *prohibited writes landed* counts runs where the "
-        "database changed although it must not. Task latency includes the local MCP server "
-        "round-trips.",
+        _metric_note(meta),
         "## Pass count by category",
         _md_table(cat_head, cat_rows),
         "## Per task",
@@ -372,9 +390,7 @@ def render_html(doc: dict[str, Any]) -> str:
 <p class="meta">{meta_items}. Prompt versions: {prompts}.</p>
 <h2>Summary by model and prompt</h2>
 {_html_table(head, rows)}
-<p class="meta">Rates are over the tasks that grade that check. Prohibited attempts counts write
-calls beyond what a task allows; prohibited writes landed counts runs where the database changed
-although it must not. Task latency includes the local MCP server round-trips.</p>
+<p class="meta">{html.escape(_metric_note(meta))}</p>
 <h2>Pass count by category</h2>
 {_html_table(cat_head, cat_rows)}
 <h2>Per task</h2>

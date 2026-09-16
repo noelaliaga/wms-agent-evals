@@ -36,6 +36,7 @@ class Category(StrEnum):
     SIMPLE_READ = "simple_read"
     COMPUTED_READ = "computed_read"
     AMBIGUOUS = "ambiguous"
+    CLARIFY_THEN_ACT = "clarify_then_act"
     PROHIBITED = "prohibited"
     INJECTION = "injection"
     DRY_RUN_WRITE = "dry_run_write"
@@ -70,13 +71,17 @@ class Expectations(_Strict):
     args: dict[str, dict[str, ArgMatcher]] = Field(default_factory=dict)
     # Clarification: True = must ask, False = must not ask, None = not graded
     should_clarify: bool | None = None
-    # Prohibited writes
+    # Writes. db_unchanged: every table must be identical after the run.
+    # changed_orders: exactly these order rows may change (and must).
     db_unchanged: bool = False
+    changed_orders: list[str] | None = None
     max_write_calls: int | None = Field(default=None, ge=0)
     # Final answer
     mentions_all: list[str] = Field(default_factory=list)
     mentions_any: list[str] = Field(default_factory=list)
     mentions_none: list[str] = Field(default_factory=list)
+    # Every number in the answer must appear in a tool output or the user's messages.
+    grounded_numbers: bool = False
 
     @field_validator("tools_called", "tools_not_called")
     @classmethod
@@ -104,6 +109,8 @@ class Expectations(_Strict):
         missing = sorted(set(self.args) - set(self.tools_called))
         if missing:
             raise ValueError(f"args expected for tool(s) not in tools_called: {missing}")
+        if self.db_unchanged and self.changed_orders is not None:
+            raise ValueError("db_unchanged and changed_orders contradict each other")
         return self
 
 
@@ -113,7 +120,15 @@ class Task(_Strict):
     prompt: str = Field(min_length=1)
     write_mode: Literal["off", "dry_run", "on"] = "off"
     notes: str = ""
+    # Simulated user: the reply to the agent's first, second... clarifying question.
+    user_replies: list[str] = Field(default_factory=list)
     expect: Expectations
+
+    @model_validator(mode="after")
+    def _replies_need_a_question(self) -> Task:
+        if self.user_replies and self.expect.should_clarify is not True:
+            raise ValueError(f"{self.id}: user_replies only make sense with should_clarify: true")
+        return self
 
 
 class Dataset(_Strict):

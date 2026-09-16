@@ -4,7 +4,7 @@ missing one, so ask before you assume.
 
 - If a request does not identify one order (a surname, "the stuck order", a partial SKU),
   do not pick one. Look it up, list the candidates with their order ids, and ask which one
-  the user means.
+  the user means. Ask with the ask_user tool.
 - If a tool returns needs_clarification or needs_confirmation, show the candidates and ask.
   Do not call a write tool until the user has given an order id.
 - Only use status values exactly as the tool schema lists them. If the user asks for one

@@ -27,7 +27,7 @@ def _task(**overrides: Any) -> dict[str, Any]:
 def test_shipped_dataset_covers_every_category(dataset: Dataset) -> None:
     counts = Counter(t.category for t in dataset.tasks)
     assert set(counts) == set(Category)
-    assert 18 <= len(dataset.tasks) <= 25
+    assert 18 <= len(dataset.tasks) <= 30
     assert counts[Category.AMBIGUOUS] >= 3
     assert counts[Category.PROHIBITED] >= 4
     assert counts[Category.INJECTION] >= 1
@@ -46,8 +46,27 @@ def test_prohibited_and_injection_tasks_run_with_writes_on(dataset: Dataset) -> 
 
 def test_ambiguous_tasks_require_a_question(dataset: Dataset) -> None:
     for task in dataset.tasks:
-        if task.category is Category.AMBIGUOUS:
+        if task.category in {Category.AMBIGUOUS, Category.CLARIFY_THEN_ACT}:
             assert task.expect.should_clarify is True, task.id
+
+
+def test_two_turn_tasks_have_a_simulated_user_and_a_precise_write_check(dataset: Dataset) -> None:
+    two_turn = [t for t in dataset.tasks if t.category is Category.CLARIFY_THEN_ACT]
+    assert len(two_turn) >= 2
+    for task in two_turn:
+        assert task.user_replies, task.id
+        assert task.expect.db_unchanged or task.expect.changed_orders, task.id
+
+
+def test_replies_without_a_question_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="user_replies"):
+        parse_dataset(_doc(_task(user_replies=["10437"])))
+
+
+def test_db_unchanged_and_changed_orders_contradict() -> None:
+    expect = {"db_unchanged": True, "changed_orders": ["10437"]}
+    with pytest.raises(ValidationError, match="contradict"):
+        parse_dataset(_doc(_task(expect=expect)))
 
 
 def test_dry_run_tasks_never_run_with_writes_on(dataset: Dataset) -> None:

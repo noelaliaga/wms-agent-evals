@@ -2,6 +2,7 @@
 
 wms-evals run --provider mock --out out/offline
 wms-evals run --provider live --models openai/<model>,gemini/<model> --out out/live
+wms-evals run --provider live --models ... --concurrency 4 --resume --out out/live
 wms-evals report out/offline/results.json --out-dir out/offline
 wms-evals compare reports/offline/results.json out/offline/results.json
 wms-evals validate
@@ -33,13 +34,45 @@ from wms_agent_evals.report import (
     results_document,
     write_reports,
 )
-from wms_agent_evals.runner import DEFAULT_MAX_STEPS, RunResult, run_matrix
+from wms_agent_evals.runner import (
+    DEFAULT_MAX_STEPS,
+    RunKey,
+    RunResult,
+    RunSpec,
+    execute,
+    plan_runs,
+)
 
 DEFAULT_RECORDINGS = Path("recordings")
+JOURNAL = "runs.jsonl"
 
 
 def _csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def _temperature(value: str) -> float | None:
+    if value.strip().lower() == "none":
+        return None
+    return float(value)
+
+
+def _key(row: dict[str, Any]) -> RunKey:
+    return (row["model"], row["prompt_version"], row["task_id"], int(row["repeat"]))
+
+
+def read_journal(path: Path) -> dict[RunKey, tuple[dict[str, Any], dict[str, Any]]]:
+    """Finished runs from an interrupted invocation; a torn last line is ignored."""
+    done: dict[RunKey, tuple[dict[str, Any], dict[str, Any]]] = {}
+    if not path.is_file():
+        return done
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        done[_key(row["result"])] = (row["result"], row["trace"])
+    return done
 
 
 def _server_version() -> str:
@@ -83,19 +116,43 @@ def cmd_run(args: argparse.Namespace) -> int:
         def factory(model: str, task: Task) -> MeteredModel:
             return live_model(model, args.temperature)
 
-    def progress(r: RunResult) -> None:
-        flag = "pass" if r.passed else "FAIL"
-        print(f"{flag:4}  {r.model:28} {r.prompt:18} {r.task_id}", file=sys.stderr)
+    specs = plan_runs(tasks, models, prompts, args.repeats)
+    args.out.mkdir(parents=True, exist_ok=True)
+    journal = args.out / JOURNAL
+    previous = read_journal(journal) if args.resume else {}
+    if not args.resume:
+        journal.unlink(missing_ok=True)
+    todo = [s for s in specs if s.key not in previous]
+    if previous:
+        print(f"resuming: {len(specs) - len(todo)} run(s) already in {journal}", file=sys.stderr)
 
-    results, traces = run_matrix(
-        tasks,
-        models,
-        prompts,
-        factory,
-        repeats=args.repeats,
-        max_steps=args.max_steps,
-        progress=progress,
-    )
+    with journal.open("a", encoding="utf-8") as jf:
+
+        def on_done(spec: RunSpec, r: RunResult, trace: dict[str, Any]) -> None:
+            jf.write(json.dumps({"result": r.to_json(), "trace": trace}, ensure_ascii=False))
+            jf.write("\n")
+            jf.flush()
+            flag = "pass" if r.passed else "FAIL"
+            print(f"{flag:4}  {r.model:28} {r.prompt:18} {r.task_id}", file=sys.stderr)
+
+        done = execute(
+            todo,
+            factory,
+            max_steps=args.max_steps,
+            concurrency=args.concurrency,
+            on_done=on_done,
+        )
+    rows: list[dict[str, Any]] = []
+    traces: list[dict[str, Any]] = []
+    for spec in specs:
+        if spec.index in done:
+            result, trace = done[spec.index]
+            rows.append(result.to_json())
+            traces.append(trace)
+        else:
+            row, trace = previous[spec.key]
+            rows.append(row)
+            traces.append(trace)
     meta: dict[str, Any] = {
         "mode": "offline" if args.provider == "mock" else "live",
         "harness": f"wms-agent-evals {__version__}",
@@ -107,10 +164,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         "repeats": args.repeats,
         "max_steps": args.max_steps,
         "temperature": None if args.provider == "mock" else args.temperature,
+        "concurrency": args.concurrency,
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-    doc = results_document(meta, [r.to_json() for r in results])
-    args.out.mkdir(parents=True, exist_ok=True)
+    doc = results_document(meta, rows)
     (args.out / "results.json").write_text(
         json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -118,9 +175,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         for row in traces:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     md, page = write_reports(doc, args.out)
-    passed = sum(r.passed for r in results)
-    landed = sum(r.score.prohibited_write_landed for r in results)
-    print(f"\n{passed}/{len(results)} runs passed; prohibited writes landed: {landed}")
+    passed = sum(bool(r["passed"]) for r in rows)
+    landed = sum(bool(r["score"]["prohibited_write_landed"]) for r in rows)
+    print(f"\n{passed}/{len(rows)} runs passed; prohibited writes landed: {landed}")
     print(f"wrote {args.out / 'results.json'}, {md.name}, {page.name}, traces.jsonl")
     if args.fail_on_landed_write and landed:
         return 1
@@ -191,7 +248,23 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--tasks", type=_csv, default=[], help="comma-separated task ids")
     run.add_argument("--repeats", type=int, default=1)
     run.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
-    run.add_argument("--temperature", type=float, default=0.0)
+    run.add_argument(
+        "--temperature",
+        type=_temperature,
+        default=0.0,
+        help="sampling temperature, or 'none' to leave it out (some reasoning models reject it)",
+    )
+    run.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="runs in parallel; each has its own database and server process",
+    )
+    run.add_argument(
+        "--resume",
+        action="store_true",
+        help=f"skip runs already recorded in OUT/{JOURNAL} by an interrupted invocation",
+    )
     run.add_argument("--out", type=Path, required=True)
     run.add_argument(
         "--fail-on-landed-write",
@@ -219,6 +292,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if getattr(args, "repeats", 1) < 1:
         print("--repeats must be >= 1", file=sys.stderr)
+        return 2
+    if getattr(args, "concurrency", 1) < 1:
+        print("--concurrency must be >= 1", file=sys.stderr)
         return 2
     code: int = args.func(args)
     return code

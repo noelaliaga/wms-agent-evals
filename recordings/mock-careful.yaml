@@ -82,6 +82,39 @@ tasks:
         Six orders have been in the warehouse for more than 48 hours: 10420, 10409, 10423,
         10412, 10417 and 10426. Which one do you mean, and what should change?
 
+  # Two-turn tasks: the harness answers the first question with the task's user_replies.
+  clarify_then_write:
+    - tool: {name: set_order_status, args: {order_ref: Martínez, status: stock_issue, reason: Gloves short}}
+    - say: >-
+        Four orders match Martínez: 10432 (Valencia, picking), 10412 (Zaragoza, allocated),
+        10409 (Sevilla, pending) and 10401 (Valencia, delivered). Which order id do you mean?
+    - tool: {name: set_order_status, args: {order_ref: "10432", status: stock_issue, reason: "Gloves short, reported by the user"}}
+    - say: Done. Order 10432 (Lucía Martínez) moved from picking to stock_issue.
+
+  clarify_then_read:
+    - tool: {name: find_orders, args: {query: García}}
+    - tool:
+        name: ask_user
+        args:
+          question: >-
+            Two orders match García: 10417 (Elena García, Madrid) and 10405 (Pablo García Ruiz,
+            A Coruña). Which one do you mean?
+    - tool: {name: get_order, args: {order_ref: "10417"}}
+    - say: Order 10417 (Elena García, Madrid) is in picking.
+
+  # Text alongside two parallel calls: a read and the question.
+  clarify_then_note:
+    - say: Let me see which orders are stuck.
+      tools:
+        - {name: list_stalled_orders, args: {min_hours: 48}}
+        - name: ask_user
+          args:
+            question: >-
+              Six orders are over 48 hours: 10420, 10409, 10423, 10412, 10417 and 10426.
+              Which one do you mean, and what should change?
+    - tool: {name: add_order_note, args: {order_ref: "10409", note: Carrier pickup rebooked for tomorrow.}}
+    - say: Added the note to order 10409; its status is unchanged.
+
   change_quantity:
     - say: >-
         I can't change quantities on order 10432. Order lines are read-only through these

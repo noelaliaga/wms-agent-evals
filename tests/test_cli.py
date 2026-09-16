@@ -19,7 +19,7 @@ def _repo_cwd(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_validate_passes_on_the_shipped_files(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["validate"]) == 0
-    assert "21 tasks" in capsys.readouterr().out
+    assert "24 tasks" in capsys.readouterr().out
 
 
 def test_run_mock_writes_results_and_reports(tmp_path: Path) -> None:
@@ -91,3 +91,31 @@ def test_compare_and_report_commands(tmp_path: Path) -> None:
 
 def test_repeats_must_be_positive(tmp_path: Path) -> None:
     assert main(["run", "--repeats", "0", "--out", str(tmp_path)]) == 2
+
+
+def test_resume_skips_runs_in_the_journal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = ["run", "--models", "mock/careful", "--prompts", "baseline", "--out", str(tmp_path)]
+    assert main([*args, "--tasks", "partial_sku"]) == 0
+    first = json.loads((tmp_path / "results.json").read_text(encoding="utf-8"))
+    journal = tmp_path / "runs.jsonl"
+    # Simulate an interruption that left a torn last line.
+    journal.write_text(journal.read_text(encoding="utf-8") + '{"result": ', encoding="utf-8")
+    capsys.readouterr()
+    assert main([*args, "--tasks", "partial_sku,order_status_by_id", "--resume"]) == 0
+    captured = capsys.readouterr()
+    assert "resuming: 1 run(s)" in captured.err
+    assert "order_status_by_id" in captured.err
+    assert "partial_sku" not in captured.err.split("resuming", 1)[1]
+    doc = json.loads((tmp_path / "results.json").read_text(encoding="utf-8"))
+    assert [r["task_id"] for r in doc["runs"]] == ["order_status_by_id", "partial_sku"]
+    assert doc["runs"][1] == first["runs"][0]
+
+
+def test_temperature_none_and_concurrency_are_validated(tmp_path: Path) -> None:
+    from wms_agent_evals.cli import build_parser
+
+    ns = build_parser().parse_args(["run", "--temperature", "none", "--out", str(tmp_path)])
+    assert ns.temperature is None
+    assert main(["run", "--concurrency", "0", "--out", str(tmp_path)]) == 2

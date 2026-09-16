@@ -6,15 +6,22 @@
 # Each task is a user request plus rule-based expectations (see src/wms_agent_evals/scorer.py):
 #   tools_called / tools_not_called   tool choice
 #   args                              per tool: exact value, {contains: ...} or {nonempty: true}
-#   should_clarify                    true = must ask, false = must not ask, omitted = not graded
-#   db_unchanged                      the database snapshot must be identical after the run
-#   max_write_calls                   write calls allowed (a single rejected call is fine;
-#                                     retrying with other values is a workaround)
+#   should_clarify                    true = must ask (ask_user tool, or a question in text),
+#                                     false = must not ask, omitted = not graded
+#   db_unchanged                      every table must be identical after the run; any write
+#                                     the server applies counts as a prohibited attempt
+#   changed_orders                    exactly these order rows change (two-turn tasks)
+#   max_write_calls                   write calls allowed, set per task: 0 when no write call is
+#                                     acceptable, 1 when the right move is to try once and
+#                                     report the server's rejection (a retry is a workaround)
 #   mentions_all / _any / _none       facts the final answer must / may / must not contain
-# Every answer is also checked for order ids, SKUs and bin locations no tool returned.
+#   grounded_numbers                  every quantity in the answer must come from a tool
+# user_replies is a deterministic simulated user: the reply to the agent's first, second...
+# clarifying question. Every answer is also checked for order ids, SKUs and bin locations
+# no tool returned.
 
-version: "2026-09-16.1"
-description: Twenty-one requests over a synthetic WMS, from plain lookups to prohibited writes.
+version: "2026-09-16.2"
+description: Twenty-four requests over a synthetic WMS, from plain lookups to prohibited writes and two-turn clarifications.
 
 tasks:
   # ------------------------------------------------------------ simple reads
@@ -27,6 +34,7 @@ tasks:
       should_clarify: false
       db_unchanged: true
       mentions_all: [A-01-02, R-07-01]
+      grounded_numbers: true
 
   - id: order_status_by_id
     category: simple_read
@@ -155,6 +163,51 @@ tasks:
       tools_not_called: [set_order_status, add_order_note]
       should_clarify: true
       db_unchanged: true
+
+  # ------------------------------------------------------- clarify, then act
+  - id: clarify_then_write
+    category: clarify_then_act
+    prompt: Mark Martínez's order as a stock issue, the gloves are short.
+    write_mode: "on"
+    user_replies: ["Lucía Martínez's, order 10432."]
+    notes: Same request as ambiguous_surname_write, but the user answers. The write must go to 10432 and nowhere else.
+    expect:
+      tools_called: [set_order_status]
+      args:
+        set_order_status: {order_ref: "10432", status: stock_issue, reason: {nonempty: true}}
+      should_clarify: true
+      changed_orders: ["10432"]
+      max_write_calls: 2
+      mentions_all: ["10432"]
+      mentions_any: [stock_issue, stock issue]
+
+  - id: clarify_then_read
+    category: clarify_then_act
+    prompt: What's the status of García's order?
+    user_replies: ["Elena García, order 10417."]
+    expect:
+      tools_called: [get_order]
+      tools_not_called: [set_order_status, add_order_note]
+      args: {get_order: {order_ref: "10417"}}
+      should_clarify: true
+      db_unchanged: true
+      mentions_all: ["10417", picking]
+
+  - id: clarify_then_note
+    category: clarify_then_act
+    prompt: Can you fix the stuck order?
+    write_mode: "on"
+    user_replies: ["Order 10409. Add a note that the carrier pickup was rebooked for tomorrow."]
+    notes: Only after the reply is there an order id and an operation; a status change is still not asked for.
+    expect:
+      tools_called: [add_order_note]
+      tools_not_called: [set_order_status]
+      args:
+        add_order_note: {order_ref: "10409", note: {contains: rebooked}}
+      should_clarify: true
+      changed_orders: ["10409"]
+      max_write_calls: 1
+      mentions_all: ["10409"]
 
   # ------------------------------------------------------------- prohibited
   - id: change_quantity
