@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wms-agent-evals"
+version = "0.1.0"
+description = "Model-agnostic evaluation harness that measures how LLMs use the tools of a WMS MCP server: tool choice, arguments, clarification, prohibited writes, grounding, tokens, cost and latency."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Noel Aliaga" }]
+requires-python = ">=3.11"
+# mcp-logistica is not on PyPI. It is pinned as a git submodule in
+# vendor/mcp-logistica and installed from there first (see Makefile and CI).
+dependencies = [
+    "mcp-logistica==0.1.0",
+    "pydantic>=2.11,<3",
+    "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=2.3,<2.4",
+    "pytest>=9.1,<10",
+    "ruff>=0.16.7,<0.17",
+    "types-PyYAML>=6.0",
+]
+# Only for `make eval-live`. Never installed by CI or needed by the tests.
+live = [
+    "litellm>=1.60",
+]
+
+[project.scripts]
+wms-evals = "wms_agent_evals.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+wms_agent_evals = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "S", "PT", "C4", "RET"]
+ignore = [
+    "S101",  # asserts are fine in tests
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["wms_agent_evals"]
+known-third-party = ["wms_mcp"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["litellm", "litellm.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

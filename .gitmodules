@@ -1,0 +1,3 @@
+[submodule "vendor/mcp-logistica"]
+	path = vendor/mcp-logistica
+	url = ../mcp-logistica
