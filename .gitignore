@@ -18,3 +18,4 @@ out/
 !.env.example
 .DS_Store
 reports/**/traces.jsonl
+reports/**/runs.jsonl

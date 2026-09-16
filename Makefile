@@ -6,12 +6,16 @@ PROMPTS ?= baseline,ask_before_assume
 REPEATS ?= 1
 TASKS   ?=
 OUT     ?= out
+CONCURRENCY ?= 1
+TEMPERATURE ?= 0
+RESUME  ?=
 
 empty :=
 space := $(empty) $(empty)
 comma := ,
 MODEL_LIST := $(subst $(space),$(comma),$(strip $(MODELS)))
 TASK_ARG   := $(if $(strip $(TASKS)),--tasks $(TASKS),)
+RESUME_ARG := $(if $(strip $(RESUME)),--resume,)
 
 .PHONY: install test lint typecheck format validate eval eval-offline check-offline \
         report-offline eval-live check clean
@@ -53,13 +57,14 @@ check-offline: eval-offline  ## fresh offline run must match the committed resul
 report-offline:  ## regenerate the committed offline results and report
 	$(BIN)/wms-evals run --provider mock --out reports/offline
 
-eval-live:  ## YOUR keys, paid calls: make eval-live MODELS="openai/<m> anthropic/<m> gemini/<m>"
+eval-live:  ## YOUR keys, paid calls: make eval-live MODELS="openai/<m> anthropic/<m> gemini/<m>" [CONCURRENCY=4 RESUME=1 TEMPERATURE=none]
 	@test -n "$(MODEL_LIST)" || (echo 'set MODELS, e.g. make eval-live MODELS="openai/<model> anthropic/<model> gemini/<model>"' && exit 2)
 	@$(BIN)/python -c 'import litellm' 2>/dev/null || (echo "run: $(BIN)/python -m pip install -e '.[live]'" && exit 2)
 	$(BIN)/wms-evals run --provider live --models $(MODEL_LIST) --prompts $(PROMPTS) \
-		--repeats $(REPEATS) $(TASK_ARG) --out $(OUT)/live
+		--repeats $(REPEATS) --temperature $(TEMPERATURE) --concurrency $(CONCURRENCY) \
+		$(RESUME_ARG) $(TASK_ARG) --out $(OUT)/live
 
-check: lint test validate check-offline
+check: lint test validate check-offline  ## everything CI runs
 
 clean:
 	rm -rf .mypy_cache .pytest_cache .ruff_cache build dist src/*.egg-info $(OUT)

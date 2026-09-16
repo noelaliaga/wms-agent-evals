@@ -8,23 +8,25 @@ permissions:
   contents: read
 
 jobs:
-  offline-eval:
+  check:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.13"]
+        # The versions run locally before the first push (see README, Status).
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       # vendor/mcp-logistica is a submodule with a relative URL (../mcp-logistica), so it
       # resolves to <owner>/mcp-logistica. While that repository is private, add a
       # read-only fine-grained token as the SUBMODULES_TOKEN secret; once it is public the
       # default token is enough.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           submodules: recursive
           token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -32,33 +34,14 @@ jobs:
             pyproject.toml
             vendor/mcp-logistica/pyproject.toml
 
-      - name: Install (mcp-logistica from the submodule, then this package)
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e vendor/mcp-logistica
-          python -m pip install -e ".[dev]"
+      # Same targets as a local run, so the workflow and the Makefile cannot drift apart.
+      - name: Install (.venv, mcp-logistica from the submodule, this package + dev tools)
+        run: make install PYTHON=python
 
-      - name: Lint
-        run: |
-          ruff check .
-          ruff format --check .
+      - name: Lint, mypy --strict, tests, dataset validation, offline eval vs committed results
+        run: make check
 
-      - name: Type check (mypy --strict)
-        run: mypy
-
-      - name: Tests
-        run: pytest
-
-      - name: Validate dataset, recordings and prompts
-        run: wms-evals validate
-
-      - name: Offline eval (mock provider, synthetic recordings, no API keys)
-        run: wms-evals run --provider mock --out out/offline
-
-      - name: Offline results match the committed report
-        run: wms-evals compare reports/offline/results.json out/offline/results.json
-
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
           name: offline-report-py${{ matrix.python-version }}

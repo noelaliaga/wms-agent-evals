@@ -25,9 +25,11 @@ dev = [
     "ruff>=0.16.7,<0.17",
     "types-PyYAML>=6.0",
 ]
-# Only for `make eval-live`. Never installed by CI or needed by the tests.
+# Only for `make eval-live`. Never installed by CI or needed by the tests (they use a
+# fake litellm module). Capped below the next major version: the adapter relies on the
+# OpenAI response format, `drop_params` and `completion_cost`.
 live = [
-    "litellm>=1.60",
+    "litellm>=1.60,<2",
 ]
 
 [project.scripts]
@@ -42,7 +44,7 @@ wms_agent_evals = ["py.typed"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["vendor"]
+extend-exclude = ["vendor", ".venv*", "out"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "S", "PT", "C4", "RET"]
