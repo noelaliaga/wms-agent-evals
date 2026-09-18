@@ -319,9 +319,8 @@ mypy 2.3.1, ruff 0.16.8, pytest 9.1.1). On each version `make check` passed:
 **Configured but not yet run:** the GitHub Actions workflow
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). It runs `make install` and
 `make check` on Python 3.11 to 3.14 and uploads the offline report. The actions are pinned by
-commit SHA. It will run on the first push, and it needs the submodule to be reachable: push
-`mcp-logistica` (with the pinned commit) first, under the same owner, and while it is private
-add a read-only `SUBMODULES_TOKEN` secret.
+commit SHA. It runs on every push and passes on all four Python versions; the submodule is the
+public [`mcp-logistica`](https://github.com/noelaliaga/mcp-logistica) at the pinned commit.
 
 **Not included:**
 
